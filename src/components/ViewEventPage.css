@@ -1,0 +1,35 @@
+/* Minimal view-specific tweaks while reusing DashboardPage.css for base styles */
+
+.view-back-button {
+  background: transparent;
+  border: 1px solid rgba(99,102,241,0.12);
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 700;
+  color: #111827;
+}
+
+.view-back-button:hover {
+  background: rgba(99,102,241,0.04);
+}
+
+/* make event detail card content spacing nicer */
+.dashboard-card .dashboard-section h2 {
+  margin-bottom: 12px;
+}
+
+/* reuse .event-card for attendee tiles; add small tweak */
+.event-card {
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* small responsive tweak */
+@media (max-width: 700px) {
+  .dashboard-card {
+    padding: 28px;
+  }
+}
