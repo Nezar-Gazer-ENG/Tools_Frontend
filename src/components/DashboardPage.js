@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import "./DashboardPage.css";
 
@@ -10,7 +10,6 @@ function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [userEmail, setUserEmail] = useState("");
 
-  // Modal state
   const [showModal, setShowModal] = useState(false);
   const [newEvent, setNewEvent] = useState({
     title: "",
@@ -27,19 +26,25 @@ function DashboardPage() {
   const [inviting, setInviting] = useState(false);
 
   const [showInviteSuccess, setShowInviteSuccess] = useState(false);
+  const successTimeoutRef = useRef(null);
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchDate, setSearchDate] = useState(""); // <--- new
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
 
   const [processingResponseId, setProcessingResponseId] = useState(null);
+  const [processingDeleteId, setProcessingDeleteId] = useState(null);
+
+  // Confirmation modal state
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null); // { id, title }
 
   useEffect(() => {
     const email = localStorage.getItem("userEmail") || "User";
     setUserEmail(email);
   }, []);
 
-  // fetch lists from server and derive responseStatus from attendees array
   const fetchLists = useCallback(async () => {
     setLoading(true);
     try {
@@ -62,17 +67,14 @@ function DashboardPage() {
 
       const meEmail = localStorage.getItem("userEmail") || userEmail;
 
-      // Build accepted id set from server's accepted endpoint (authoritative)
       const acceptedIds = new Set(
         Array.isArray(acceptedData) ? acceptedData.map((ev) => String(ev.id)) : []
       );
 
-      // Map accepted list (server returns only accepted)
       const mappedAccepted = Array.isArray(acceptedData)
         ? acceptedData.map((ev) => ({ ...ev, responseStatus: "accepted" }))
         : [];
 
-      // Map invited list and ensure it's strictly pending AND not already present in accepted
       const mappedInvited = Array.isArray(invitedData)
         ? invitedData
             .map((ev) => {
@@ -83,7 +85,6 @@ function DashboardPage() {
                 responseStatus: status,
               };
             })
-            // keep only pending invites and exclude any that are in acceptedIds
             .filter((ev) => {
               const idStr = String(ev.id);
               const isAcceptedByServer = acceptedIds.has(idStr);
@@ -109,7 +110,7 @@ function DashboardPage() {
   }, [fetchLists]);
 
   useEffect(() => {
-    if (!searchQuery || !searchQuery.trim()) {
+    if (!searchQuery && !searchDate) {
       setSearchResults([]);
       setSearching(false);
       return;
@@ -118,8 +119,13 @@ function DashboardPage() {
     setSearching(true);
     const t = setTimeout(async () => {
       try {
+        // build query params (q and date)
+        const params = new URLSearchParams();
+        if (searchQuery && searchQuery.trim()) params.set("q", searchQuery.trim());
+        if (searchDate) params.set("date", searchDate);
+
         const res = await fetch(
-          `http://localhost:8080/events/search?q=${encodeURIComponent(searchQuery)}`,
+          `http://localhost:8080/events/search?${params.toString()}`,
           { credentials: "include" }
         );
         if (!res.ok) {
@@ -144,7 +150,7 @@ function DashboardPage() {
     }, 400);
 
     return () => clearTimeout(t);
-  }, [searchQuery, userEmail]);
+  }, [searchQuery, searchDate, userEmail]); // <--- added searchDate
 
   const logout = async () => {
     await fetch("http://localhost:8080/logout", { credentials: "include" });
@@ -208,9 +214,7 @@ function DashboardPage() {
 
       setShowInviteModal(false);
       setShowInviteSuccess(true);
-      setTimeout(() => setShowInviteSuccess(false), 1800);
 
-      // refresh lists to show the pending invite
       await fetchLists();
     } catch (err) {
       console.error(err);
@@ -224,7 +228,6 @@ function DashboardPage() {
     if (!eventId) return;
     setProcessingResponseId(eventId);
     try {
-      // send canonical statuses: "accepted" or "declined"
       const sendStatus = status === "accepted" ? "accepted" : "declined";
 
       const res = await fetch("http://localhost:8080/events/respond", {
@@ -239,7 +242,6 @@ function DashboardPage() {
         throw new Error(data.error || "Failed to send response");
       }
 
-      // Optimistic UI update:
       if (sendStatus === "accepted") {
         const moved = invited.find((e) => String(e.id) === String(eventId));
         if (moved) {
@@ -251,11 +253,9 @@ function DashboardPage() {
         setSearchResults((prev) => prev.filter((e) => String(e.id) !== String(eventId)));
       }
 
-      // authoritative refresh
       await fetchLists();
 
       setShowInviteSuccess(true);
-      setTimeout(() => setShowInviteSuccess(false), 1400);
     } catch (err) {
       console.error(err);
       alert(err.message);
@@ -264,9 +264,63 @@ function DashboardPage() {
     }
   };
 
-  const clearSearch = () => {
-    setSearchQuery("");
-    setSearchResults([]);
+  // Auto-hide success modal after a short delay but allow manual OK to dismiss.
+  useEffect(() => {
+    if (showInviteSuccess) {
+      // clear any existing timer
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+      }
+      // auto-hide after 2500ms
+      successTimeoutRef.current = setTimeout(() => {
+        setShowInviteSuccess(false);
+        successTimeoutRef.current = null;
+      }, 2500);
+    } else {
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+        successTimeoutRef.current = null;
+      }
+    }
+    return () => {
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+        successTimeoutRef.current = null;
+      }
+    };
+  }, [showInviteSuccess]);
+
+  // Delete event (called from confirmation modal)
+  const deleteEvent = async (eventId) => {
+    if (!eventId) return;
+    setProcessingDeleteId(eventId);
+    try {
+      const res = await fetch(`http://localhost:8080/events/${eventId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (res.status === 401) {
+        alert("Not logged in");
+        navigate("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to delete event");
+      }
+
+      setOrganized((prev) => prev.filter((e) => String(e.id) !== String(eventId)));
+      setShowDeleteModal(false);
+      setDeleteTarget(null);
+      await fetchLists();
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+    } finally {
+      setProcessingDeleteId(null);
+    }
   };
 
   if (loading) return <div className="dashboard-loading">Loading...</div>;
@@ -283,11 +337,25 @@ function DashboardPage() {
             onChange={(e) => setSearchQuery(e.target.value)}
           />
           {searchQuery ? (
-            <button className="search-clear" onClick={clearSearch} aria-label="Clear search">×</button>
+            <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Clear search">×</button>
           ) : null}
         </div>
-        <div className="search-subtext">
-          {searching ? "Searching..." : searchQuery ? `${searchResults.length} results` : "Search events by title"}
+
+        <div className="date-row">
+          <div className="date-input">
+            <input
+              type="date"
+              value={searchDate}
+              onChange={(e) => setSearchDate(e.target.value)}
+              className="date-field"
+            />
+            {searchDate ? (
+              <button className="search-clear" onClick={() => setSearchDate("")} aria-label="Clear date">×</button>
+            ) : null}
+          </div>
+          <div className="search-subtext">
+            {searching ? "Searching..." : (searchQuery || searchDate) ? `${searchResults.length} results` : "Filter by date"}
+          </div>
         </div>
       </div>
 
@@ -307,7 +375,7 @@ function DashboardPage() {
           </div>
         </div>
 
-        {searchQuery && (
+        {(searchQuery || searchDate) && (
           <div className="dashboard-section">
             <h2>Search Results</h2>
             {searchResults.length === 0 && !searching && <p className="empty-text">No events found.</p>}
@@ -345,7 +413,13 @@ function DashboardPage() {
                   >
                     Invite
                   </button>
-                  <button className="cancel-button">Cancel</button>
+                  <button
+                    className="cancel-button"
+                    disabled={processingDeleteId === event.id}
+                    onClick={() => { setDeleteTarget({ id: event.id, title: event.title }); setShowDeleteModal(true); }}
+                  >
+                    {processingDeleteId === event.id ? "Deleting..." : "Cancel"}
+                  </button>
                 </div>
               </div>
             ))}
@@ -386,14 +460,14 @@ function DashboardPage() {
                     disabled={processingResponseId === event.id}
                     onClick={() => respondToEvent(event.id, "accepted")}
                   >
-                    {processingResponseId === event.id ? "..." : "Accept"}
+                    {processingResponseId === event.id ? "..." : "Going"}
                   </button>
                   <button
                     className="cancel-button"
                     disabled={processingResponseId === event.id}
                     onClick={() => respondToEvent(event.id, "declined")}
                   >
-                    {processingResponseId === event.id ? "..." : "Decline"}
+                    {processingResponseId === event.id ? "..." : "Not Going"}
                   </button>
                 </div>
               </div>
@@ -481,10 +555,42 @@ function DashboardPage() {
         </div>
       )}
 
+      {showDeleteModal && deleteTarget && (
+        <div className="modal-backdrop">
+          <div className="confirm-modal-card">
+            <h3>Delete Event</h3>
+            <p className="confirm-text">Are you sure you want to delete "<strong>{deleteTarget.title}</strong>"? This action cannot be undone.</p>
+            <div className="confirm-actions">
+              <button
+                className="confirm-button"
+                onClick={() => deleteEvent(deleteTarget.id)}
+                disabled={processingDeleteId === deleteTarget.id}
+              >
+                {processingDeleteId === deleteTarget.id ? "Deleting..." : "Yes, delete"}
+              </button>
+              <button
+                className="confirm-cancel"
+                onClick={() => { setShowDeleteModal(false); setDeleteTarget(null); }}
+                disabled={processingDeleteId === deleteTarget.id}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showInviteSuccess && (
         <div className="modal-backdrop">
-          <div className="modal-card success-modal-card">
+          <div className="modal-card success-modal-card" role="dialog" aria-modal="true">
             <h2 className="success-text">Success</h2>
+            <button
+              className="success-ok-button"
+              onClick={() => setShowInviteSuccess(false)}
+              aria-label="Dismiss success"
+            >
+              OK
+            </button>
           </div>
         </div>
       )}
